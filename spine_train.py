@@ -182,7 +182,7 @@ import os
 from collections import OrderedDict
 
 
-def patients_to_slices(base_dir, fold, labelnum):
+def patients_to_slices(base_dir, fold, labelnum=None, labeled_ratio=0.1, seed=1337):
     list_file = os.path.join(base_dir, f"lists/train_fold{fold}.list")
     assert os.path.exists(list_file), f"{list_file} not found"
 
@@ -192,22 +192,23 @@ def patients_to_slices(base_dir, fold, labelnum):
     patient_dict = OrderedDict()
     for s in slices:
         name = os.path.basename(s)
-
         parts = name.split("_")
         assert parts[0] == "Patient", f"Unexpected slice name: {name}"
         pid = parts[1]
-
         patient_dict.setdefault(pid, []).append(s)
 
     patient_ids = list(patient_dict.keys())
 
-    assert labelnum <= len(patient_ids), \
-        f"labelnum={labelnum} > patients in this fold ({len(patient_ids)})"
+    if labelnum is None:
+        labelnum = max(1, int(round(len(patient_ids) * labeled_ratio)))
+    labelnum = min(labelnum, len(patient_ids))
 
-    labeled_patients = patient_ids[:labelnum]
+    rng = random.Random(seed + fold) 
+    shuffled = patient_ids.copy()
+    rng.shuffle(shuffled)
+    labeled_patients = shuffled[:labelnum]
 
     labeled_slices = sum(len(patient_dict[pid]) for pid in labeled_patients)
-
     return labeled_slices
 
 def get_coarse_mask_path(coarse_root, split, case):
@@ -296,12 +297,21 @@ def pre_train(args, snapshot_path):
                             transform=transforms.Compose([RandomGenerator(args.patch_size)]))
     db_val = BaseDataSets(base_dir=args.root_path, split="val", fold=args.fold)
     total_slices = len(db_train)
-    labeled_slice = patients_to_slices(args.root_path, args.fold, args.labelnum)
+labeled_slice = patients_to_slices(
+    args.root_path, args.fold,
+    labelnum=None,       
+    labeled_ratio=0.1,      
+    seed=args.seed
+)
 
-    labeled_idxs = list(range(0, labeled_slice))
-    unlabeled_idxs = list(range(labeled_slice, total_slices))
-    batch_sampler = TwoStreamBatchSampler(labeled_idxs, unlabeled_idxs, args.batch_size,
-                                          args.batch_size - args.labeled_bs)
+labeled_idxs = list(range(0, labeled_slice))
+unlabeled_idxs = list(range(labeled_slice, total_slices))
+
+batch_sampler = TwoStreamBatchSampler(
+    labeled_idxs, unlabeled_idxs,
+    args.batch_size,
+    args.batch_size - args.labeled_bs
+)
 
     trainloader = DataLoader(db_train, batch_sampler=batch_sampler, num_workers=4, pin_memory=True,
                              worker_init_fn=worker_init_fn)
